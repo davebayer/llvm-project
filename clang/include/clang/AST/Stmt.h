@@ -2462,6 +2462,10 @@ public:
     return getStatementKind() == IfStatementKind::Constexpr;
   }
 
+  bool isCUDATarget() const {
+    return getStatementKind() == IfStatementKind::CUDATarget;
+  }
+
   void setStatementKind(IfStatementKind Kind) {
     IfStmtBits.Kind = static_cast<unsigned>(Kind);
   }
@@ -2470,7 +2474,7 @@ public:
     return static_cast<IfStatementKind>(IfStmtBits.Kind);
   }
 
-  /// If this is an 'if constexpr', determine which substatement will be taken.
+  /// If this is a compile-time if, determine which substatement will be taken.
   /// Otherwise, or if the condition is value-dependent, returns std::nullopt.
   std::optional<const Stmt *> getNondiscardedCase(const ASTContext &Ctx) const;
   std::optional<Stmt *> getNondiscardedCase(const ASTContext &Ctx);

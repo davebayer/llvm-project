@@ -4719,6 +4719,12 @@ def HLSLControlFlowHint: StmtAttr {
   let Documentation = [InternalOnly];
 }
 
+def CUDATarget : StmtAttr {
+  let Spellings = [CXX11<"nv", "if_target">];
+  let Subjects = SubjectList<[IfStmt], ErrorDiag, "'if' statements">;
+  let Documentation = [InternalOnly];
+}
+
 def CapturedRecord : InheritableAttr {
   // This attribute has no spellings as it is only ever created implicitly.
   let Spellings = [];

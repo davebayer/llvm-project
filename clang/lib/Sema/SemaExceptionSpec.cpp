@@ -1591,7 +1591,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
       CT = mergeCanThrow(CT, canThrow(CondDS));
     CT = mergeCanThrow(CT, canThrow(IS->getCond()));
 
-    // For 'if constexpr', consider only the non-discarded case.
+    // For compile-time ifs, consider only the non-discarded case.
     // FIXME: We should add a DiscardedStmt marker to the AST.
     if (std::optional<const Stmt *> Case = IS->getNondiscardedCase(Context))
       return *Case ? mergeCanThrow(CT, canThrow(*Case)) : CT;
@@ -1601,10 +1601,12 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
     if (Then == Else)
       return mergeCanThrow(CT, Then);
 
-    // For a dependent 'if constexpr', the result is dependent if it depends on
+    // For a dependent compile-time if, the result is dependent if it depends on
     // the value of the condition.
-    return mergeCanThrow(CT, IS->isConstexpr() ? CT_Dependent
-                                               : mergeCanThrow(Then, Else));
+    return mergeCanThrow(CT,
+                         (IS->isConstexpr() || IS->isCUDATarget())
+                             ? CT_Dependent
+                             : mergeCanThrow(Then, Else));
   }
 
   case Stmt::CXXTryStmtClass: {

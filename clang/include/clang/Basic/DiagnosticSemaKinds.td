@@ -3895,10 +3895,10 @@ def warn_attribute_has_no_effect_on_infinite_loop : Warning<
 def note_attribute_has_no_effect_on_infinite_loop_here : Note<
   "annotating the infinite loop here">;
 def warn_attribute_has_no_effect_on_compile_time_if : Warning<
-  "attribute %0 has no effect when annotating an 'if %select{constexpr|consteval}1' statement">,
+  "attribute %0 has no effect when annotating %select{an 'if constexpr'|an 'if consteval'|a '[[nv::if_target]] if'}1 statement">,
    InGroup<IgnoredAttributes>;
 def note_attribute_has_no_effect_on_compile_time_if_here : Note<
-  "annotating the 'if %select{constexpr|consteval}0' statement here">;
+  "annotating %select{the 'if constexpr'|the 'if consteval'|the '[[nv::if_target]] if'}0 statement here">;
 def err_decl_attribute_invalid_on_stmt : Error<
   "%0%select{ attribute|}1 cannot be applied to a statement">;
 def err_attribute_invalid_on_decl : Error<
@@ -7001,6 +7001,8 @@ def note_protected_by_constexpr_if : Note<
   "jump enters controlled statement of constexpr if">;
 def note_protected_by_consteval_if : Note<
   "jump enters controlled statement of consteval if">;
+def note_protected_by_cuda_target_if : Note<
+  "jump enters controlled statement of CUDA target if">;
 def note_protected_by_if_available : Note<
   "jump enters controlled statement of if available">;
 def note_protected_by_vla : Note<

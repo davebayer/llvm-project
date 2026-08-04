@@ -226,6 +226,12 @@ def err_c2y_labeled_break_continue : Error<
 def err_c2y_first_condition_clause_is_not_declaration : Error<
   "first clause in condition must be a declaration">;
 def err_c2y_multiple_declarations : Error<"multiple declarations are not allowed">;
+def err_cuda_target_if_requires_cuda : Error<
+  "'[[nv::if_target]] if' is only supported in CUDA">;
+def err_cuda_target_if_bad_condition : Error<
+  "'[[nv::if_target]] if' condition must be a constant nv::target selector expression">;
+def err_cuda_target_if_constexpr_or_consteval : Error<
+  "'[[nv::if_target]] if' cannot also be a constexpr or consteval if statement">;
 
 // Generic errors.
 def err_expected_expression : Error<"expected expression">;

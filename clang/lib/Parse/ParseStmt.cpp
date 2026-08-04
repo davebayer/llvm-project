@@ -11,11 +11,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/DeclCXX.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/PrettyDeclStackTrace.h"
 #include "clang/Basic/Attributes.h"
+#include "clang/Basic/Cuda.h"
 #include "clang/Basic/PrettyStackTrace.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TokenKinds.h"
+#include "clang/Lex/MacroInfo.h"
 #include "clang/Parse/LoopHint.h"
 #include "clang/Parse/Parser.h"
 #include "clang/Parse/RAIIObjectsForParser.h"
@@ -29,13 +33,255 @@
 #include "clang/Sema/TypoCorrection.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/StringExtras.h"
 #include <optional>
+#include <string>
 
 using namespace clang;
 
 //===----------------------------------------------------------------------===//
 // C99 6.8: Statements and Blocks.
 //===----------------------------------------------------------------------===//
+
+namespace {
+
+SourceLocation consumeCUDATargetAttr(ParsedAttributes &Attrs) {
+  SourceLocation Loc;
+  SmallVector<ParsedAttr *, 1> ToRemove;
+
+  for (ParsedAttr &Attr : Attrs) {
+    if (Attr.isInvalid() || Attr.getParsedKind() != ParsedAttr::AT_CUDATarget)
+      continue;
+    if (Loc.isInvalid())
+      Loc = Attr.getLoc();
+    ToRemove.push_back(&Attr);
+  }
+
+  for (ParsedAttr *Attr : ToRemove)
+    Attrs.remove(Attr);
+
+  return Loc;
+}
+
+bool isWithinNVTargetNamespace(const DeclContext *DC) {
+  for (; DC; DC = DC->getParent()) {
+    const auto *NS = dyn_cast<NamespaceDecl>(DC);
+    if (!NS || !NS->getIdentifier() || NS->getName() != "target")
+      continue;
+
+    const DeclContext *Parent = NS->getParent();
+    while (Parent && !isa<NamespaceDecl, TranslationUnitDecl>(Parent))
+      Parent = Parent->getParent();
+
+    const auto *ParentNS = dyn_cast_if_present<NamespaceDecl>(Parent);
+    return ParentNS && ParentNS->getIdentifier() && ParentNS->getName() == "nv";
+  }
+  return false;
+}
+
+bool isNVTargetDecl(const NamedDecl *D, StringRef Name) {
+  if (!D)
+    return false;
+
+  D = D->getUnderlyingDecl();
+  return D->getIdentifier() && D->getName() == Name &&
+         isWithinNVTargetNamespace(D->getDeclContext());
+}
+
+bool parseNVTargetSMName(StringRef Name, unsigned &SM) {
+  if (!Name.consume_front("sm_"))
+    return false;
+
+  StringRef Digits = Name.take_while([](char C) { return llvm::isDigit(C); });
+  if (Digits.empty())
+    return false;
+
+  return !Digits.getAsInteger(10, SM);
+}
+
+const Expr *ignoreCUDATargetSelectorWrappers(const Expr *E) {
+  while (true) {
+    E = E->IgnoreParenImpCasts();
+
+    if (const auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E)) {
+      E = MTE->getSubExpr();
+      continue;
+    }
+
+    if (const auto *BTE = dyn_cast<CXXBindTemporaryExpr>(E)) {
+      E = BTE->getSubExpr();
+      continue;
+    }
+
+    if (const auto *CE = dyn_cast<CXXConstructExpr>(E);
+        CE && CE->getNumArgs() == 1 &&
+        CE->getConstructor()->isCopyOrMoveConstructor()) {
+      E = CE->getArg(0);
+      continue;
+    }
+
+    return E;
+  }
+}
+
+std::optional<unsigned> getCudaArchMacroValue(Preprocessor &PP) {
+  IdentifierInfo *II = PP.getIdentifierInfo("__CUDA_ARCH__");
+  const MacroInfo *MI = PP.getMacroInfo(II);
+  if (!MI || !MI->isObjectLike() || MI->getNumTokens() != 1)
+    return std::nullopt;
+
+  const Token &Value = MI->getReplacementToken(0);
+  if (Value.isNot(tok::numeric_constant))
+    return std::nullopt;
+
+  unsigned Arch = 0;
+  std::string Spelling = PP.getSpelling(Value);
+  if (StringRef(Spelling).getAsInteger(10, Arch))
+    return std::nullopt;
+  return Arch;
+}
+
+unsigned getCurrentCudaArch(Preprocessor &PP) {
+  if (std::optional<unsigned> Arch = getCudaArchMacroValue(PP))
+    return *Arch;
+
+  const TargetInfo &TI = PP.getTargetInfo();
+  if (!TI.getTriple().isNVPTX())
+    return 0;
+
+  OffloadArch Arch = StringToOffloadArch(TI.getTargetOpts().CPU);
+  if (!Arch.isNVPTX())
+    return 0;
+
+  return CudaArchToID(Arch);
+}
+
+class CUDATargetSelectorEvaluator {
+  unsigned CudaSM;
+
+  bool evaluateSMSelector(const Expr *E, unsigned &SM) {
+    E = ignoreCUDATargetSelectorWrappers(E);
+
+    if (const auto *DRE = dyn_cast<DeclRefExpr>(E)) {
+      const NamedDecl *D = DRE->getDecl()->getUnderlyingDecl();
+      return D->getIdentifier() &&
+             isWithinNVTargetNamespace(D->getDeclContext()) &&
+             parseNVTargetSMName(D->getName(), SM);
+    }
+
+    return false;
+  }
+
+  bool evaluateCall(const CallExpr *E, bool &Result) {
+    const FunctionDecl *Callee = E->getDirectCallee();
+    if (!Callee || E->getNumArgs() != 1)
+      return false;
+
+    unsigned SelectorSM = 0;
+    if (!evaluateSMSelector(E->getArg(0), SelectorSM))
+      return false;
+
+    if (isNVTargetDecl(Callee, "provides")) {
+      Result = CudaSM != 0 && CudaSM >= SelectorSM * 10;
+      return true;
+    }
+
+    if (isNVTargetDecl(Callee, "is_exactly")) {
+      Result = CudaSM != 0 && CudaSM == SelectorSM * 10;
+      return true;
+    }
+
+    return false;
+  }
+
+public:
+  CUDATargetSelectorEvaluator(Parser &P)
+      : CudaSM(getCurrentCudaArch(P.getPreprocessor())) {}
+
+  bool evaluate(const Expr *E, bool &Result) {
+    E = ignoreCUDATargetSelectorWrappers(E);
+
+    if (const auto *DRE = dyn_cast<DeclRefExpr>(E)) {
+      const ValueDecl *D = DRE->getDecl();
+      if (isNVTargetDecl(D, "is_host")) {
+        Result = CudaSM == 0;
+        return true;
+      }
+      if (isNVTargetDecl(D, "is_device")) {
+        Result = CudaSM != 0;
+        return true;
+      }
+      if (isNVTargetDecl(D, "any_target")) {
+        Result = true;
+        return true;
+      }
+      if (isNVTargetDecl(D, "no_target")) {
+        Result = false;
+        return true;
+      }
+      return false;
+    }
+
+    if (const auto *UO = dyn_cast<UnaryOperator>(E)) {
+      if (UO->getOpcode() != UO_LNot)
+        return false;
+      if (!evaluate(UO->getSubExpr(), Result))
+        return false;
+      Result = !Result;
+      return true;
+    }
+
+    if (const auto *BO = dyn_cast<BinaryOperator>(E)) {
+      if (!BO->isLogicalOp())
+        return false;
+      bool LHS = false;
+      bool RHS = false;
+      if (!evaluate(BO->getLHS(), LHS) || !evaluate(BO->getRHS(), RHS))
+        return false;
+      Result = BO->getOpcode() == BO_LAnd ? LHS && RHS : LHS || RHS;
+      return true;
+    }
+
+    if (const auto *OO = dyn_cast<CXXOperatorCallExpr>(E)) {
+      switch (OO->getOperator()) {
+      case OO_Exclaim:
+        if (OO->getNumArgs() != 1 || !evaluate(OO->getArg(0), Result))
+          return false;
+        Result = !Result;
+        return true;
+      case OO_AmpAmp: {
+        if (OO->getNumArgs() != 2)
+          return false;
+        bool LHS = false;
+        bool RHS = false;
+        if (!evaluate(OO->getArg(0), LHS) || !evaluate(OO->getArg(1), RHS))
+          return false;
+        Result = LHS && RHS;
+        return true;
+      }
+      case OO_PipePipe: {
+        if (OO->getNumArgs() != 2)
+          return false;
+        bool LHS = false;
+        bool RHS = false;
+        if (!evaluate(OO->getArg(0), LHS) || !evaluate(OO->getArg(1), RHS))
+          return false;
+        Result = LHS || RHS;
+        return true;
+      }
+      default:
+        return false;
+      }
+    }
+
+    if (const auto *CE = dyn_cast<CallExpr>(E))
+      return evaluateCall(CE, Result);
+
+    return false;
+  }
+};
+
+} // namespace
 
 StmtResult Parser::ParseStatement(SourceLocation *TrailingElseLoc,
                                   ParsedStmtContext StmtCtx,
@@ -295,8 +541,10 @@ Retry:
     return Actions.ActOnNullStmt(ConsumeToken(), HasLeadingEmptyMacro);
   }
 
-  case tok::kw_if:                  // C99 6.8.4.1: if-statement
-    return ParseIfStatement(TrailingElseLoc);
+  case tok::kw_if: {                // C99 6.8.4.1: if-statement
+    SourceLocation CUDATargetAttrLoc = consumeCUDATargetAttr(CXX11Attrs);
+    return ParseIfStatement(TrailingElseLoc, CUDATargetAttrLoc);
+  }
   case tok::kw_switch:              // C99 6.8.4.2: switch-statement
     return ParseSwitchStatement(TrailingElseLoc, PrecedingLabel);
 
@@ -1461,10 +1709,12 @@ struct MisleadingIndentationChecker {
 
 }
 
-StmtResult Parser::ParseIfStatement(SourceLocation *TrailingElseLoc) {
+StmtResult Parser::ParseIfStatement(SourceLocation *TrailingElseLoc,
+                                    SourceLocation CUDATargetAttrLoc) {
   assert(Tok.is(tok::kw_if) && "Not an if stmt!");
   SourceLocation IfLoc = ConsumeToken();  // eat the 'if'.
 
+  bool IsCUDATarget = CUDATargetAttrLoc.isValid();
   bool IsConstexpr = false;
   bool IsConsteval = false;
   SourceLocation NotLocation;
@@ -1501,6 +1751,14 @@ StmtResult Parser::ParseIfStatement(SourceLocation *TrailingElseLoc) {
     return StmtError();
   }
 
+  if (IsCUDATarget) {
+    if (!getLangOpts().CUDA)
+      Diag(CUDATargetAttrLoc, diag::err_cuda_target_if_requires_cuda);
+    if (IsConstexpr || IsConsteval)
+      Diag(CUDATargetAttrLoc,
+           diag::err_cuda_target_if_constexpr_or_consteval);
+  }
+
   bool C99orCXX = getLangOpts().C99 || getLangOpts().CPlusPlus;
 
   // C99 6.8.4p3 - In C99, the if statement is a block.  This is not
@@ -1522,18 +1780,68 @@ StmtResult Parser::ParseIfStatement(SourceLocation *TrailingElseLoc) {
   Sema::ConditionResult Cond;
   SourceLocation LParen;
   SourceLocation RParen;
+  std::optional<bool> CUDATargetCondition;
   std::optional<bool> ConstexprCondition;
   if (!IsConsteval) {
 
-    if (ParseParenExprOrCondition(&InitStmt, Cond, IfLoc,
-                                  IsConstexpr ? Sema::ConditionKind::ConstexprIf
-                                              : Sema::ConditionKind::Boolean,
-                                  LParen, RParen))
-      return StmtError();
+    if (IsCUDATarget) {
+      BalancedDelimiterTracker T(*this, tok::l_paren);
+      if (T.expectAndConsume(diag::err_expected_lparen_after, "if"))
+        return StmtError();
 
-    if (IsConstexpr)
-      ConstexprCondition = Cond.getKnownValue();
+      ExprResult TargetCond = ParseExpression();
+
+      if (TargetCond.isInvalid() && Tok.isNot(tok::r_paren)) {
+        SkipUntil(tok::semi);
+        if (Tok.isNot(tok::r_paren))
+          return StmtError();
+      }
+
+      T.consumeClose();
+      LParen = T.getOpenLocation();
+      RParen = T.getCloseLocation();
+
+      if (TargetCond.isInvalid())
+        return StmtError();
+
+      bool TargetCondValue = false;
+      if (!CUDATargetSelectorEvaluator(*this).evaluate(TargetCond.get(),
+                                                       TargetCondValue)) {
+        Diag(TargetCond.get()->getExprLoc(),
+             diag::err_cuda_target_if_bad_condition)
+            << TargetCond.get()->getSourceRange();
+        return StmtError();
+      }
+
+      CUDATargetCondition = TargetCondValue;
+      ExprResult CondExpr;
+      if (getLangOpts().CPlusPlus)
+        CondExpr = Actions.ActOnCXXBoolLiteral(
+            LParen, TargetCondValue ? tok::kw_true : tok::kw_false);
+      else
+        CondExpr =
+            Actions.ActOnIntegerConstant(LParen, TargetCondValue ? 1 : 0);
+      if (CondExpr.isInvalid())
+        return StmtError();
+      Cond = Actions.ActOnCondition(getCurScope(), IfLoc, CondExpr.get(),
+                                    Sema::ConditionKind::Boolean);
+      if (Cond.isInvalid())
+        return StmtError();
+    } else {
+      if (ParseParenExprOrCondition(
+              &InitStmt, Cond, IfLoc,
+              IsConstexpr ? Sema::ConditionKind::ConstexprIf
+                          : Sema::ConditionKind::Boolean,
+              LParen, RParen))
+        return StmtError();
+
+      if (IsConstexpr)
+        ConstexprCondition = Cond.getKnownValue();
+    }
   }
+
+  if (IsCUDATarget)
+    ConstexprCondition = CUDATargetCondition;
 
   bool IsBracedThen = Tok.is(tok::l_brace);
 
@@ -1674,7 +1982,9 @@ StmtResult Parser::ParseIfStatement(SourceLocation *TrailingElseLoc) {
     ElseStmt = Actions.ActOnNullStmt(ElseStmtLoc);
 
   IfStatementKind Kind = IfStatementKind::Ordinary;
-  if (IsConstexpr)
+  if (IsCUDATarget)
+    Kind = IfStatementKind::CUDATarget;
+  else if (IsConstexpr)
     Kind = IfStatementKind::Constexpr;
   else if (IsConsteval)
     Kind = NotLocation.isValid() ? IfStatementKind::ConstevalNegated

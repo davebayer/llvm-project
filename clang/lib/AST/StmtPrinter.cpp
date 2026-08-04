@@ -326,6 +326,9 @@ void StmtPrinter::PrintRawIfStmt(IfStmt *If) {
     return;
   }
 
+  if (If->isCUDATarget())
+    OS << "[[nv::if_target]] ";
+
   OS << "if (";
   if (If->getInit())
     PrintInitStmt(If->getInit(), 4);

@@ -997,16 +997,19 @@ StmtResult Sema::ActOnIfStmt(SourceLocation IfLoc,
   if (!ConstevalOrNegatedConsteval && !elseStmt)
     DiagnoseEmptyStmtBody(RParenLoc, thenStmt, diag::warn_empty_if_body);
 
+  bool CUDATargetIf = StatementKind == IfStatementKind::CUDATarget;
   if (ConstevalOrNegatedConsteval ||
-      StatementKind == IfStatementKind::Constexpr) {
+      StatementKind == IfStatementKind::Constexpr || CUDATargetIf) {
+    unsigned CompileTimeIfKind =
+        ConstevalOrNegatedConsteval ? 1 : (CUDATargetIf ? 2 : 0);
     auto DiagnoseLikelihood = [&](const Stmt *S) {
       if (const Attr *A = Stmt::getLikelihoodAttr(S)) {
         Diags.Report(A->getLocation(),
                      diag::warn_attribute_has_no_effect_on_compile_time_if)
-            << A << ConstevalOrNegatedConsteval << A->getRange();
+            << A << CompileTimeIfKind << A->getRange();
         Diags.Report(IfLoc,
                      diag::note_attribute_has_no_effect_on_compile_time_if_here)
-            << ConstevalOrNegatedConsteval
+            << CompileTimeIfKind
             << SourceRange(IfLoc, (ConstevalOrNegatedConsteval
                                        ? thenStmt->getBeginLoc()
                                        : LParenLoc)

@@ -371,7 +371,7 @@ void JumpScopeChecker::BuildScopeInformation(Stmt *S,
   case Stmt::IfStmtClass: {
     IfStmt *IS = cast<IfStmt>(S);
     bool AMDGPUPredicate = false;
-    if (!(IS->isConstexpr() || IS->isConsteval() ||
+    if (!(IS->isConstexpr() || IS->isCUDATarget() || IS->isConsteval() ||
           IS->isObjCAvailabilityCheck() ||
           (AMDGPUPredicate = this->S.AMDGPU().IsPredicate(IS->getCond()))))
       break;
@@ -379,6 +379,8 @@ void JumpScopeChecker::BuildScopeInformation(Stmt *S,
     unsigned Diag = diag::note_protected_by_if_available;
     if (IS->isConstexpr())
       Diag = diag::note_protected_by_constexpr_if;
+    else if (IS->isCUDATarget())
+      Diag = diag::note_protected_by_cuda_target_if;
     else if (IS->isConsteval())
       Diag = diag::note_protected_by_consteval_if;
     else if (AMDGPUPredicate)

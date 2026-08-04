@@ -1091,7 +1091,7 @@ bool IfStmt::isObjCAvailabilityCheck() const {
 }
 
 std::optional<Stmt *> IfStmt::getNondiscardedCase(const ASTContext &Ctx) {
-  if (!isConstexpr() || getCond()->isValueDependent())
+  if (!(isConstexpr() || isCUDATarget()) || getCond()->isValueDependent())
     return std::nullopt;
   return !getCond()->EvaluateKnownConstInt(Ctx) ? getElse() : getThen();
 }

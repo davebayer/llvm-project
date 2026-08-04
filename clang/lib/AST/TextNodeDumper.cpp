@@ -1492,6 +1492,8 @@ void TextNodeDumper::VisitIfStmt(const IfStmt *Node) {
     OS << " has_else";
   if (Node->isConstexpr())
     OS << " constexpr";
+  if (Node->isCUDATarget())
+    OS << " cuda_target";
   if (Node->isConsteval()) {
     OS << " ";
     if (Node->isNegatedConsteval())

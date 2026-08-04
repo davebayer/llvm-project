@@ -2019,7 +2019,7 @@ struct CounterCoverageMappingBuilder
   }
 
   void coverIfConstexpr(const IfStmt *S) {
-    assert(S->isConstexpr());
+    assert(S->isConstexpr() || S->isCUDATarget());
 
     // evaluate constant condition...
     const bool isTrue =
@@ -2033,7 +2033,7 @@ struct CounterCoverageMappingBuilder
     // to properly calculate line coverage in llvm-cov utility
     const Counter ParentCount = getRegion().getCounter();
 
-    // ignore 'if constexpr ('
+    // ignore 'if constexpr (' / '[[nv::if_target]] if ('
     SourceLocation startOfSkipped = S->getIfLoc();
 
     if (const auto *Init = S->getInit()) {
@@ -2070,11 +2070,11 @@ struct CounterCoverageMappingBuilder
   }
 
   void VisitIfStmt(const IfStmt *S) {
-    // "if constexpr" and "if consteval" are not normal conditional statements,
-    // their discarded statement should be skipped
+    // Compile-time if statements have a discarded statement that should be
+    // skipped.
     if (S->isConsteval())
       return coverIfConsteval(S);
-    else if (S->isConstexpr())
+    else if (S->isConstexpr() || S->isCUDATarget())
       return coverIfConstexpr(S);
 
     extendRegion(S);

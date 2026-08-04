@@ -557,15 +557,15 @@ mlir::LogicalResult CIRGenFunction::emitIfStmt(const IfStmt &s) {
     if (s.getConditionVariable())
       emitDecl(*s.getConditionVariable());
 
-    // If the condition folds to a constant and this is an 'if constexpr',
-    // we simplify it early in CIRGen to avoid emitting the full 'if'.
+    // If the condition folds to a constant and this is a compile-time if,
+    // simplify it early in CIRGen to avoid emitting the full 'if'.
     bool condConstant;
-    if (constantFoldsToBool(s.getCond(), condConstant, s.isConstexpr())) {
-      if (s.isConstexpr()) {
-        // Handle "if constexpr" explicitly here to avoid generating some
-        // ill-formed code since in CIR the "if" is no longer simplified
-        // in this lambda like in Clang but postponed to other MLIR
-        // passes.
+    if (constantFoldsToBool(s.getCond(), condConstant,
+                            s.isConstexpr() || s.isCUDATarget())) {
+      if (s.isConstexpr() || s.isCUDATarget()) {
+        // Handle compile-time ifs explicitly here to avoid generating some
+        // ill-formed code since in CIR the "if" is no longer simplified in this
+        // lambda like in Clang but postponed to other MLIR passes.
         if (const Stmt *executed = condConstant ? s.getThen() : s.getElse())
           return emitStmt(executed, /*useCurrentScope=*/true);
         // There is nothing to execute at runtime.

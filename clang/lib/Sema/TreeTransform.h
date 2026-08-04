@@ -8402,10 +8402,15 @@ TreeTransform<Derived>::TransformIfStmt(IfStmt *S) {
       return StmtError();
   }
 
-  // If this is a constexpr if, determine which arm we should instantiate.
+  // If this is a compile-time if, determine which arm we should instantiate.
   std::optional<bool> ConstexprConditionValue;
   if (S->isConstexpr())
     ConstexprConditionValue = Cond.getKnownValue();
+  else if (S->isCUDATarget()) {
+    if (std::optional<llvm::APSInt> Val =
+            Cond.get().second->getIntegerConstantExpr(getSema().Context))
+      ConstexprConditionValue = !!*Val;
+  }
 
   // Transform the "then" branch.
   StmtResult Then;

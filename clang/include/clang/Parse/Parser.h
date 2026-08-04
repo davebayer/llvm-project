@@ -7500,7 +7500,9 @@ public:
   /// [C++23] 'if' '!' [opt] consteval compound-statement 'else' statement
   /// \endverbatim
   ///
-  StmtResult ParseIfStatement(SourceLocation *TrailingElseLoc);
+  StmtResult ParseIfStatement(SourceLocation *TrailingElseLoc,
+                              SourceLocation CUDATargetAttrLoc =
+                                  SourceLocation());
 
   /// ParseSwitchStatement
   /// \verbatim

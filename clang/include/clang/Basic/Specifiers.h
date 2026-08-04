@@ -40,6 +40,7 @@ namespace clang {
   enum class IfStatementKind : unsigned {
     Ordinary,
     Constexpr,
+    CUDATarget,
     ConstevalNonNegated,
     ConstevalNegated
   };
